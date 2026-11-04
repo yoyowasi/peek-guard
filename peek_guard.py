@@ -4,14 +4,15 @@
 회색 II = 일시정지(카메라 꺼짐), 검정 ! = 카메라를 쓸 수 없음.
 창 없이 백그라운드에서 돈다. 카메라 화면은 우클릭 메뉴에서 '카메라 화면 보기'를 직접 골랐을 때만 뜬다.
 '감시 간격'을 고르면 그 간격마다 카메라를 잠깐 켜서 확인하고 끈다(LED가 켜져 있는 시간이 줄어든다).
-감도·간격 등은 settings.json에서 바꾸며, 저장하면 실행 중에도 바로 반영된다(README 참고).
+감도·간격 등은 settings.toml에서 바꾸며(항목마다 설명이 달려 있다), 저장하면 실행 중에도 바로 반영된다.
 """
 import ctypes
-import json
 import math
+import re
 import subprocess
 import threading
 import time
+import tomllib
 import urllib.request
 from pathlib import Path
 
@@ -24,7 +25,7 @@ INTERVAL_CHOICES = (0, 5, 10, 30)
 SCAN_FRAMES = 3          # 간격 감시에서 카메라를 켤 때마다 볼 프레임 수
 SCAN_GAP = 0.15          # 초, 그 프레임 사이 간격
 
-# settings.json에 없는 항목은 이 값을 쓴다. 각 항목의 뜻은 README에 있다.
+# settings.toml에 없는 항목은 이 값을 쓴다. 각 항목의 뜻은 아래 SETTINGS_TEMPLATE 주석에 있다.
 DEFAULT_SETTINGS = {
     "camera_index": 0,
     "scan_every_seconds": 10,
@@ -36,8 +37,43 @@ DEFAULT_SETTINGS = {
     "notify_cooldown_seconds": 30,
 }
 
+# settings.toml을 처음 만들 때 쓰는 내용. 사용자가 메모장으로 고치는 파일이라 항목마다 설명을 단다.
+SETTINGS_TEMPLATE = """\
+# Peek Guard 설정 파일
+# 값을 고치고 저장하면 실행 중에도 바로 반영됩니다. '#'으로 시작하는 줄은 설명이라 동작에 영향이 없습니다.
+# 잘못 고치면 알림이 뜨고, 고칠 때까지 이전 설정으로 동작합니다.
+
+# 카메라 번호. 노트북 내장 카메라는 보통 0, 외장 웹캠을 꽂았다면 1이나 2.
+camera_index = {camera_index}
+
+# 몇 초마다 카메라를 잠깐 켜서 확인할지. 0이면 카메라를 계속 켜 둡니다(LED도 계속 켜짐).
+# 트레이 메뉴의 '감시 간격'에서 고르면 여기에 저장됩니다.
+scan_every_seconds = {scan_every_seconds}
+
+# 얼굴 방향 허용치. 0은 카메라(노트북 화면)를 정면으로 보는 얼굴이고, 클수록 옆으로 돌린 얼굴까지 '보는 중'으로 셉니다.
+# 노트북 화면만 본다면 0.4, 옆의 외부 모니터도 본다면 1.0 정도.
+# 메뉴의 '카메라 화면 보기'를 켜면 얼굴 위에 이 수치가 보입니다. 내 얼굴 수치보다 0.2쯤 크게 잡으면 됩니다.
+max_yaw_ratio = {max_yaw_ratio}
+
+# 얼마나 먼 사람까지 셀지. 화면 너비 대비 얼굴 크기라서, 작을수록 더 먼 사람까지 셉니다.
+# 0.06이면 약 2m, 0.04면 약 3m입니다(일반 노트북 카메라 기준 추정).
+min_face_ratio = {min_face_ratio}
+
+# 얼굴이라고 판단할 확신도(0~1). 낮추면 얼굴을 더 잘 잡지만 엉뚱한 것을 얼굴로 볼 수 있습니다.
+score_threshold = {score_threshold}
+
+# 2명 이상이 몇 번 연속으로 보여야 경고할지. 늘리면 뒤로 지나가는 사람에 덜 반응합니다.
+alert_frames = {alert_frames}
+
+# 경고할 때 Windows 알림을 띄울지(true 또는 false). 트레이 메뉴의 '알림'과 같습니다.
+notify = {notify}
+
+# 같은 알림을 다시 띄우기까지 최소 몇 초 기다릴지.
+notify_cooldown_seconds = {notify_cooldown_seconds}
+"""
+
 HERE = Path(__file__).parent
-SETTINGS_PATH = HERE / "settings.json"
+SETTINGS_PATH = HERE / "settings.toml"
 MODEL_URL = ("https://github.com/opencv/opencv_zoo/raw/main/models/"
              "face_detection_yunet/face_detection_yunet_2023mar.onnx")
 MODEL_PATH = HERE / "face_detection_yunet_2023mar.onnx"
@@ -59,12 +95,10 @@ def make_icon(color, text):
 
 
 def load_settings():
-    """settings.json을 읽어 기본값에 덮어쓴다. 파일이 없으면 기본값으로 만든다. 잘못된 내용이면 ValueError."""
+    """settings.toml을 읽어 기본값에 덮어쓴다. 파일이 없으면 기본값으로 만든다. 잘못된 내용이면 ValueError."""
     if not SETTINGS_PATH.exists():
-        save_settings(DEFAULT_SETTINGS)
-    user = json.loads(SETTINGS_PATH.read_text(encoding="utf-8-sig"))  # 메모장이 붙이는 BOM도 읽는다
-    if not isinstance(user, dict):
-        raise ValueError("{ ... } 형태의 JSON이어야 합니다")
+        write_settings(DEFAULT_SETTINGS)
+    user = tomllib.loads(SETTINGS_PATH.read_text(encoding="utf-8-sig"))  # 메모장이 붙이는 BOM도 읽는다
     for key, value in user.items():
         if key not in DEFAULT_SETTINGS:
             raise ValueError(f"모르는 항목: {key}")
@@ -77,8 +111,23 @@ def load_settings():
     return {**DEFAULT_SETTINGS, **user}
 
 
-def save_settings(settings):
-    SETTINGS_PATH.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+def toml_value(value):
+    return str(value).lower() if isinstance(value, bool) else repr(value)
+
+
+def write_settings(settings):
+    """설명이 달린 settings.toml을 새로 쓴다."""
+    text = SETTINGS_TEMPLATE.format(**{k: toml_value(v) for k, v in settings.items()})
+    SETTINGS_PATH.write_text(text, encoding="utf-8")
+
+
+def save_setting(key, value):
+    """settings.toml에서 그 항목의 값만 바꾼다. 설명과 사용자가 고친 다른 줄은 그대로 둔다."""
+    line = f"{key} = {toml_value(value)}"
+    text, found = re.subn(rf"(?m)^[ \t]*{key}[ \t]*=.*$", line, SETTINGS_PATH.read_text(encoding="utf-8-sig"), count=1)
+    if not found:
+        text = text.rstrip("\n") + f"\n{line}\n"
+    SETTINGS_PATH.write_text(text, encoding="utf-8")
 
 
 def ensure_model():
@@ -130,7 +179,7 @@ class PeekGuard:
         self.status = "시작 중"
         self._shown = None
         self._settings_mtime = None
-        self._lock = threading.Lock()   # 메뉴(저장)와 감시 스레드(다시 읽기)가 settings.json을 함께 쓴다
+        self._lock = threading.Lock()   # 메뉴(저장)와 감시 스레드(다시 읽기)가 settings.toml을 함께 쓴다
         self._stop = threading.Event()
         self._wake = threading.Event()  # 메뉴를 바꾸면 쉬던 감시 스레드를 바로 깨운다
         self._worker = threading.Thread(target=self._run, daemon=True)
@@ -177,16 +226,18 @@ class PeekGuard:
                                 radio=True)
 
     def _set(self, key, value):
-        """메뉴에서 바꾼 값을 적용하고 settings.json에도 저장한다. 파일이 잘못돼 있으면 사용자가 고칠 수 있게 덮어쓰지 않는다."""
+        """메뉴에서 바꾼 값을 적용하고 settings.toml에도 저장한다. 파일이 잘못돼 있으면 사용자가 고칠 수 있게 덮어쓰지 않는다."""
         with self._lock:
             self.cfg = {**self.cfg, key: value}
             if not self.settings_error:
-                save_settings(self.cfg)
+                if not SETTINGS_PATH.exists():
+                    write_settings(self.cfg)
+                save_setting(key, value)
                 self._settings_mtime = SETTINGS_PATH.stat().st_mtime
         self._wake.set()
 
     def _reload_if_changed(self):
-        """settings.json이 바뀌었으면(또는 처음이면) 다시 읽는다. 읽었으면 True."""
+        """settings.toml이 바뀌었으면(또는 처음이면) 다시 읽는다. 읽었으면 True."""
         with self._lock:
             mtime = SETTINGS_PATH.stat().st_mtime if SETTINGS_PATH.exists() else None
             if mtime is not None and mtime == self._settings_mtime:
@@ -196,14 +247,14 @@ class PeekGuard:
                 self.settings_error = None
             except (OSError, ValueError) as e:  # 잘못 고친 파일은 알리고 이전 설정으로 계속 돈다
                 self.settings_error = str(e)
-                self.icon.notify(f"settings.json을 읽지 못해 이전 설정으로 동작합니다.\n{e}", "Peek Guard")
+                self.icon.notify(f"settings.toml을 읽지 못해 이전 설정으로 동작합니다.\n{e}", "Peek Guard")
             self._settings_mtime = SETTINGS_PATH.stat().st_mtime if SETTINGS_PATH.exists() else None
         self.icon.update_menu()
         return True
 
     def _open_settings(self, icon, item):
         if not SETTINGS_PATH.exists():
-            save_settings(self.cfg)
+            write_settings(self.cfg)
         subprocess.Popen(["notepad.exe", str(SETTINGS_PATH)])
 
     def _quit(self, icon, item):

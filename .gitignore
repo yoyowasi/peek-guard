@@ -1,4 +1,4 @@
 # 각자 환경에 맞춘 설정과 처음 실행할 때 내려받는 모델
-settings.json
+settings.toml
 *.onnx
 __pycache__/
