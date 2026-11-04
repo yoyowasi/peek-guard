@@ -16,9 +16,15 @@ import tomllib
 import urllib.request
 from pathlib import Path
 
-import cv2
-import pystray
-from PIL import Image, ImageDraw, ImageFont
+try:
+    import cv2
+    import pystray
+    from PIL import Image, ImageDraw, ImageFont
+except ImportError as e:  # pythonw로 실행하면 오류가 안 보이고 조용히 꺼지므로 메시지 상자로 알린다
+    ctypes.windll.user32.MessageBoxW(
+        0, f"필요한 패키지를 찾을 수 없습니다: {e.name}\n\n이 폴더에서 pip install -r requirements.txt 를 실행하세요.",
+        "Peek Guard 오류", 0x10)
+    raise
 
 CHECK_INTERVAL = 0.5     # 초, 계속 감시할 때 감지 주기
 INTERVAL_CHOICES = (0, 5, 10, 30)
